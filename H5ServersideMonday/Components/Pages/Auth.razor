@@ -1,0 +1,177 @@
+﻿@page "/auth"
+
+@using H5ServersideMonday.Components.Models
+@using H5ServersideMonday.Components.Repositories
+@using H5ServersideMonday.Components.Security
+@using Microsoft.AspNetCore.Authorization
+@using System.Security.Cryptography
+@using System.Text
+
+@attribute [Authorize]
+
+@inject CprRepository _cprRepository;
+@inject ToDoRepository _toDoRepository;
+@inject AuthenticationStateProvider _authenticationStateProvider;
+@inject Hashing hashing;
+@inject AsymetricEncryptionHandler _encrypter;
+
+<PageTitle>Auth</PageTitle>
+
+<h1>You are authenticated</h1>
+
+<AuthorizeView>
+    Hello @context.User.Identity?.Name!
+
+    <div hidden="@isValidated">
+        <h3>Indtast CPR nummer</h3>
+        <InputText type="text" @bind-Value="cpr"/>
+        <button @onclick="SendInput">submit</button>
+        <p style="color:red">@ErrorMessage</p>
+    </div>
+    <div hidden="@(!isValidated)">
+        <div> 
+            <ul id="ToDoList">
+                @foreach (var item in @itemList)
+                {
+                    <li>@item.Item</li>
+                }
+            </ul>
+        </div>
+        <div>
+            <p>Indtast ny todo item.</p>
+            <InputText @bind-Value="toDoInputValue"></InputText>
+            <button @onclick="AddItem">Tilføj</button>
+
+        </div>
+    </div>
+</AuthorizeView>
+
+@code{
+    private string cpr;
+    private int userId;
+    private string toDoInputValue;
+    private List<ToDoList> itemList = new();
+    private bool isValidated = false;
+    private string ErrorMessage;
+
+
+    private async void SendInput()
+    {
+        if (!string.IsNullOrEmpty(cpr))
+        {
+            var temporaryCpr = cpr;
+            ErrorMessage = "";
+            try
+            {
+                var returnType = new byte[0];
+                var user = await _authenticationStateProvider.GetAuthenticationStateAsync();
+                var userCprEntry = await _cprRepository.GetUserId(user?.User.Identity.Name);
+                if (userCprEntry is not null)
+                {
+                    var returnedHash = hashing.HashSha256(returnType, temporaryCpr);
+                    byte[] existingCpr = Encoding.UTF8.GetBytes(userCprEntry.Cpr);
+                    var isCprValid = CompareHash(returnedHash, existingCpr); //await _cprRepository.ValidCpr(userCprEntry.Id, temporaryCpr);
+                    if (isCprValid == true)
+                    {
+                        var toDoResult = await _toDoRepository.GetList(userCprEntry.Id);
+                        userId = userCprEntry.Id;
+                        itemList = DecryptToDoList(toDoResult);
+                        isValidated = true;
+                        cpr = temporaryCpr;
+
+                    }
+                    else
+                    {
+                        ErrorMessage = "Cpr is invalid.";
+                    }
+
+                    StateHasChanged();
+                }
+                else
+                {
+                    string newHash = "";
+                    newHash = hashing.HashSha256(newHash, temporaryCpr);
+                    CprEntry newCprEntry = new CprEntry()
+                        {
+                            User = user.User.Identity.Name,
+                            Cpr = newHash
+                        };
+                    await _cprRepository.CreateCpr(newCprEntry);
+                    SendInput();
+                }
+
+
+            }
+            catch (Exception ex)
+            {
+
+                throw new Exception(ex.Message);
+            }
+        }
+        else
+        {
+            ErrorMessage = "Indtast Cpr nummer.";
+        }
+    }
+
+    private async void AddItem()
+    {
+        if (!string.IsNullOrEmpty(toDoInputValue))
+        {
+            if (isValidated == true)
+            {
+                try
+                {
+                    string encryptedText = _encrypter.EncryptAsymetric(toDoInputValue);
+                    ToDoList newToDo = new()
+                        {
+                            UserId = userId,
+                            Item = encryptedText,
+                        };
+
+                    var toDoResult = await _toDoRepository.AddToDO(newToDo);
+                    string encryptedItem = toDoResult.Item;
+                    toDoResult.Item = _encrypter.DecryptAssymetric(encryptedItem);
+                    itemList.Add(toDoResult);
+                    toDoInputValue = "";
+                    StateHasChanged();
+                }
+                catch (Exception ex)
+                {
+
+                    throw new Exception(ex.Message);
+                }   
+            }
+        }
+    }
+
+    private bool CompareHash(byte[] firstArray, byte[] secondArray)
+    {
+        if (firstArray.Length != secondArray.Length)
+            return false;
+        for (int i = 0; i < firstArray.Length; i++)
+        {
+            if (firstArray[i] != secondArray[i])
+                return false;
+        }
+        return true;
+    }
+
+    private List<ToDoList> DecryptToDoList(List<ToDoList> listToDecrypt)
+    {
+        List<ToDoList> decryptedList = new();
+        foreach (var toDoItem in listToDecrypt)
+        {
+            ToDoList decryptedItem = new()
+                {
+                    UserId = toDoItem.UserId,
+                    Item = _encrypter.DecryptAssymetric(toDoItem.Item)
+                };
+            decryptedList.Add(decryptedItem);
+
+
+        }
+        return decryptedList;
+    }
+
+}
